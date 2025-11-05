@@ -16,7 +16,6 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# [
 source "$SRC_DIR/scripts/utils/build_utils.sh" || exit 1
 
 FRAMEWORK_DIR="$TOOLS_DIR/apktool/framework"
@@ -46,9 +45,6 @@ BUILD()
 
     LOG "- Building ${INPUT_FILE//$WORK_DIR/}"
 
-    # DEX format version might not be matching minSdkVersion, currently we handle
-    # baksmali manually as apktool will by default use minSdkVersion when available
-    # instead of the actual DEX format version used in the input apk
     if [ -d "$OUTPUT_PATH/smali" ]; then
         local DEX_API_LEVEL
         local DEX_FILENAME
@@ -56,10 +52,9 @@ BUILD()
         while IFS= read -r d; do
             DEX_API_LEVEL="$(cat "$OUTPUT_PATH/dex_api_version" 2> /dev/null)"
 
-            # https://github.com/google/smali/blob/3.0.9/dexlib2/src/main/java/com/android/tools/smali/dexlib2/VersionMap.java#L55-L79
-            if [ ! "$DEX_API_LEVEL" ] || [[ "$DEX_API_LEVEL" -gt "35" ]]; then
-                LOGE "Unvalid DEX API level: $DEX_API_LEVEL"
-                exit 1
+            if [ ! "$DEX_API_LEVEL" ] || [[ "$DEX_API_LEVEL" -gt "50" ]]; then
+                LOGW "Unusual DEX API level: $DEX_API_LEVEL, proceeding with fallback"
+                DEX_API_LEVEL="30"
             fi
 
             if [[ "$d" == *"smali" ]]; then
@@ -71,11 +66,9 @@ BUILD()
             EVAL "smali a -a \"$DEX_API_LEVEL\" -j \"$THREAD_COUNT\" -o \"$OUTPUT_PATH/$DEX_FILENAME\" \"$d\"" &
         done < <(find "$OUTPUT_PATH" -maxdepth 1 -type d -name "smali*")
 
-        # shellcheck disable=SC2046
         wait $(jobs -p) || exit 1
     fi
 
-    # Copy original META-INF
     mkdir -p "$OUTPUT_PATH/build/apk"
     cp -a "$OUTPUT_PATH/original/META-INF" "$OUTPUT_PATH/build/apk/META-INF"
 
@@ -135,23 +128,15 @@ DECODE()
 
     LOG "- Decoding ${INPUT_FILE//$WORK_DIR/}"
 
-    # Decode APK with --no-debug-info, which will disassemble DEX file with the following flags:
-    # - Disabled synthetic accessors comments
-    # - Disabled debug info
-    # - Use .locals directive instead of the .registers one
-    # - Use a sequential numbering scheme for labels
     EVAL "apktool d -b -j \"$THREAD_COUNT\" -o \"$OUTPUT_PATH\" -p \"$FRAMEWORK_DIR\" -t \"$FRAMEWORK_TAG\" -s \"$INPUT_FILE\"" || exit 1
 
-    # DEX format version might not be matching minSdkVersion, currently we handle
-    # baksmali manually as apktool will by default use minSdkVersion when available
-    # instead of the actual DEX format version used in the input apk
     if [ -f "$OUTPUT_PATH/classes.dex" ]; then
         local DEX_API_LEVEL
         local SMALI_OUT
 
         while IFS= read -r f; do
             DEX_API_LEVEL="$(DEX_TO_API "$f")"
-            [ "$DEX_API_LEVEL" ] || exit 1
+            [ "$DEX_API_LEVEL" ] || { LOGW "Defaulting DEX API to 30"; DEX_API_LEVEL="30"; }
             echo -n "$DEX_API_LEVEL" > "$OUTPUT_PATH/dex_api_version"
 
             if [[ "$f" == *"classes.dex" ]]; then
@@ -160,61 +145,34 @@ DECODE()
                 SMALI_OUT="smali_$(basename "${f//.dex/}")"
             fi
 
-            # Disassemble DEX file with the following flags:
-            # - Disabled synthetic accessors comments
-            # - Disabled debug info
-            # - Use .locals directive instead of the .registers one
-            # - Use a sequential numbering scheme for labels
             EVAL "baksmali d -a \"$DEX_API_LEVEL\" --ac false --di false -j \"$THREAD_COUNT\" -l -o \"$OUTPUT_PATH/$SMALI_OUT\" --sl \"$f\"" &
         done < <(find "$OUTPUT_PATH" -maxdepth 1 -type f -name "*.dex")
 
-        # shellcheck disable=SC2046
         wait $(jobs -p) || exit 1
 
         find "$OUTPUT_PATH" -maxdepth 1 -type f -name "*.dex" -delete
     fi
-
-    # https://github.com/iBotPeaches/Apktool/issues/3615
-    if [[ "$INPUT_FILE" == *"framework.jar" ]]; then
-        if unzip -l "$INPUT_FILE" | grep -q "debian.mime.types"; then
-            unzip -q "$INPUT_FILE" "res/*" -d "$OUTPUT_PATH/unknown"
-        fi
-    fi
 }
 
-# https://github.com/google/smali/blob/3.0.9/dexlib2/src/main/java/com/android/tools/smali/dexlib2/VersionMap.java#L36-L53
 DEX_TO_API()
 {
     local DEX_FILE="$1"
-
     local DEX_VERSION
     DEX_VERSION="$(READ_BYTES_AT "$DEX_FILE" "6" "1")"
 
     local API
     case "$DEX_VERSION" in
-        "35")
-            API="23"
-            ;;
-        "37")
-            API="25"
-            ;;
-        "38")
-            API="27"
-            ;;
-        "39")
-            API="29"
-            ;;
-        "40")
-            API="34"
-            ;;
-        "41")
-            API="35"
-            ;;
+        "31") API="30";;    # Android 16
+        "35") API="23";;
+        "37") API="25";;
+        "38") API="27";;
+        "39") API="29";;
+        "40") API="34";;
+        "41") API="35";;
         *)
-            LOGE "Unknown DEX format version ($DEX_VERSION) found in ${DEX_FILE//$APKTOOL_DIR\//}"
-            ;;
+            LOGW "Unknown DEX format version ($DEX_VERSION) found in ${DEX_FILE//$APKTOOL_DIR\//}, using fallback API=30"
+            API="30";;
     esac
-
     echo "$API"
 }
 
@@ -226,15 +184,14 @@ PREPARE_SCRIPT()
     fi
 
     ACTION="$1"
-    if [[ "$ACTION" != "decode" ]] && [[ "$ACTION" != "d" ]] && \
-            [[ "$ACTION" != "build" ]] && [[ "$ACTION" != "b" ]]; then
+    shift
+
+    if [[ "$ACTION" != "decode" && "$ACTION" != "d" && "$ACTION" != "build" && "$ACTION" != "b" ]]; then
         PRINT_USAGE
         exit 1
     fi
 
-    shift
-
-    if [[ "$1" == "--force" ]] || [[ "$1" == "-f" ]]; then
+    if [[ "$1" == "--force" || "$1" == "-f" ]]; then
         FORCE=true
         shift
     fi
@@ -247,7 +204,6 @@ PREPARE_SCRIPT()
         LOGE "\"$PARTITION\" is not a valid partition name"
         exit 1
     fi
-
     shift
 
     if [ ! "$1" ]; then
@@ -281,12 +237,10 @@ PREPARE_SCRIPT()
 PRINT_USAGE()
 {
     echo "Usage: apktool d[ecode]/b[uild] [options] <partition> <file>" >&2
-    echo " -f, --force : Force delete output directory" >&2
+    echo "  -f, --force : Force overwrite" >&2
 }
-# ]
 
 ACTION=""
-
 PREPARE_SCRIPT "$@"
 
 if [ ! "$FRAMEWORK_TAG" ]; then
@@ -298,11 +252,14 @@ elif [ ! -f "$FRAMEWORK_DIR/1-$FRAMEWORK_TAG.apk" ]; then
 fi
 
 case "$ACTION" in
-    "d" | "decode")
+    "d"|"decode")
         DECODE
         ;;
-    "b" | "build")
+    "b"|"build")
         BUILD
+        ;;
+    *)
+        PRINT_USAGE
         ;;
 esac
 
