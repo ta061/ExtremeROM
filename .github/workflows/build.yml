@@ -60,42 +60,38 @@ jobs:
           source ./buildenv.sh ${{ matrix.target }}
           ./scripts/build_dependencies.sh
 
-      - name: Download source firmware
+      - name: Download source firmware if missing
         run: |
           source ./buildenv.sh ${{ matrix.target }}
-          ./scripts/download_fw.sh --force --ignore-target
+          ./scripts/download_fw.sh --ignore-target
 
-      - name: Extract source firmware
+      - name: Extract source firmware if missing
         run: |
           source ./buildenv.sh ${{ matrix.target }}
-          ./scripts/extract_fw.sh --force --ignore-target
+          ./scripts/extract_fw.sh --ignore-target
 
-      - name: Download target firmware
+      - name: Download target firmware if missing
         run: |
           source ./buildenv.sh ${{ matrix.target }}
-          ./scripts/download_fw.sh --force --ignore-source
+          ./scripts/download_fw.sh --ignore-source
 
-      - name: Extract target firmware
+      - name: Extract target firmware if missing
         run: |
           source ./buildenv.sh ${{ matrix.target }}
-          ./scripts/extract_fw.sh --force --ignore-source
+          ./scripts/extract_fw.sh --ignore-source
 
-      - name: Build ROM
+      - name: Build ROM (incremental)
         run: |
           source ./buildenv.sh ${{ matrix.target }}
-          ./scripts/make_rom.sh --force
+          ./scripts/make_rom.sh
 
       - name: Upload to GoFile
         run: |
           ZIP_FILE=$(find out -maxdepth 1 -type f -name "*.zip" | head -n 1)
-
           RESPONSE=$(curl -s -F "file=@$ZIP_FILE" -F "token=${{ secrets.GOFILE_TOKEN }}" -F "folderId=${{ secrets.GOFILE_FOLDER_ID }}" "https://upload-eu-par.gofile.io/uploadFile")
-
           echo "Uploaded successfully! Download link:"
           echo "$RESPONSE" | jq -r '.data.downloadPage'
-
           echo "MD5:"
           md5sum "$ZIP_FILE"
-
           echo "SHA256:"
           sha256sum "$ZIP_FILE"
